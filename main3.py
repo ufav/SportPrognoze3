@@ -25,8 +25,20 @@ async def send_telegram_message(message, pin=False, chat_id=telegram_channel_id)
         # Ограничение длины сообщения
         max_length = 4096
         if len(message) > max_length:
-            for i in range(0, len(message), max_length):
-                part = message[i:i+max_length]
+            # Делим сообщение по пробелам, чтобы избежать разрывов слов
+            words = message.split(' ')
+            parts = []
+            part = ""
+            for word in words:
+                if len(part) + len(word) + 1 <= max_length:
+                    part += word + " "
+                else:
+                    parts.append(part.strip())
+                    part = word + " "
+            if part:
+                parts.append(part.strip())
+
+            for part in parts:
                 await bot.send_message(chat_id=chat_id, text=part)
         else:
             sent_message = await bot.send_message(chat_id=chat_id, text=message)
@@ -48,87 +60,131 @@ async def send_telegram_message(message, pin=False, chat_id=telegram_channel_id)
 
 # Функция для парсинга страницы беттеров и получения ссылок
 def parse_betters(url):
-    response = requests.get(url)
-    html_content = response.content
-    soup = BeautifulSoup(html_content, 'html.parser')
-    forecasters = soup.find_all('a', class_='forecaster-rating__item')
-    links = []
-    for forecaster in forecasters:
-        forecaster_url = forecaster['href']
-        profit_str = forecaster.find('span', class_='forecaster-rating__item-badge').text.strip().replace('%', '')
-        try:
-            profit = float(profit_str)
-        except ValueError:
-            continue
-        if profit >= 30:
-            links.append(forecaster_url)
-    return links
+    try:
+        response = requests.get(url)
+        html_content = response.content
+        soup = BeautifulSoup(html_content, 'html.parser')
+        forecasters = soup.find_all('a', class_='forecaster-rating__item')
+        links = []
+        for forecaster in forecasters:
+            try:
+                forecaster_url = forecaster['href']
+                profit_str = forecaster.find('span', class_='forecaster-rating__item-badge').text.strip().replace('%', '')
+                profit = float(profit_str)
+                if profit >= 30:
+                    links.append(forecaster_url)
+            except Exception as e:
+                error_message = f"Error in parse_betters function, processing forecaster: {forecaster}\nError: {str(e)}"
+                logging.error(error_message)
+                # Отправка сообщения в бот с деталями ошибки
+                asyncio.run(send_telegram_message(error_message, chat_id=telegram_id))
+        return links
+    except Exception as e:
+        error_message = f"Error in parse_betters function when requesting URL: {url}\nError: {str(e)}"
+        logging.error(error_message)
+        # Отправка сообщения в бот с деталями ошибки
+        asyncio.run(send_telegram_message(error_message, chat_id=telegram_id))
+        return []
 
 
 # Функция для парсинга ссылок на ставки для каждого беттера
 def parse_bets(better_url):
-    tip_response = requests.get(better_url)
-    tip_html_content = tip_response.text
-    tip_soup = BeautifulSoup(tip_html_content, 'html.parser')
-    lasttips = tip_soup.find('div', id='lasttips')
-    bets_links = []
-    if lasttips:
-        for bet in lasttips.find_all('div', class_='mini-tip'):
-            if 'is-draw' in bet['class']:
-                teams_link = bet.find('a', class_='mini-tip__teams')
-                if teams_link:
-                    link = teams_link['href']
-                    bets_links.append(link)
-    return bets_links
+    try:
+        tip_response = requests.get(better_url)
+        tip_html_content = tip_response.text
+        tip_soup = BeautifulSoup(tip_html_content, 'html.parser')
+        lasttips = tip_soup.find('div', id='lasttips')
+        bets_links = []
+        if lasttips:
+            for bet in lasttips.find_all('div', class_='mini-tip'):
+                try:
+                    if 'is-draw' in bet['class']:
+                        teams_link = bet.find('a', class_='mini-tip__teams')
+                        if teams_link:
+                            link = teams_link['href']
+                            bets_links.append(link)
+                except Exception as e:
+                    error_message = f"Error in parse_bets function, processing bet: {bet}\nError: {str(e)}"
+                    logging.error(error_message)
+                    # Отправка сообщения в бот с деталями ошибки
+                    asyncio.run(send_telegram_message(error_message, chat_id=telegram_id))
+        return bets_links
+    except Exception as e:
+        error_message = f"Error in parse_bets function when requesting URL: {better_url}\nError: {str(e)}"
+        logging.error(error_message)
+        # Отправка сообщения в бот с деталями ошибки
+        asyncio.run(send_telegram_message(error_message, chat_id=telegram_id))
+        return []
 
 
 # Функция для парсинга данных ставок
 def parse_bet_data(bet_url):
-    response = requests.get(bet_url)
-    soup = BeautifulSoup(response.text, 'html.parser')
-    # Проверяем наличие дива с результатом
-    result_element = soup.select_one('div.vp-forecast-bet__value-bank.vp-forecast-bet__value-bank-result')
-    print(result_element)
-    outcome_type = None
-    if result_element:
-        if 'is-default' in result_element.get('class', []):
-            outcome_type = "draw"
-        elif 'is-up' in result_element.get('class', []):
-            outcome_type = "win"
-        elif 'is-down' in result_element.get('class', []):
-            outcome_type = "lose"
+    try:
+        response = requests.get(bet_url)
+        response.raise_for_status()  # Добавлено для обработки HTTP ошибок
+        soup = BeautifulSoup(response.text, 'html.parser')
 
-        return {
-            'outcome_type': outcome_type,
-            'status': 'done'
-        }
-    else:
-        # Если элемента нет, собираем данные для нового прогноза
-        event_datetime = soup.find('time', class_='vp-match-card-content__info-match-date')['datetime']
-        outcome_type = "new"
-        link = bet_url
-        sides = soup.find('h1', class_='site-title site-title_h2').text
-        sport = soup.find('b', class_='vp-match-card-content__info-match-type').text
-        league = soup.find('span', class_='vp-match-card-content__info-match-league').text
-        bet_title = soup.find('div', class_='vp-forecast-bet__title')
-        stake = bet_title.find('a').text if bet_title else ''
-        stake_element = bet_title.find_all('a')[1] if bet_title and len(bet_title.find_all('a')) > 1 else None
-        odds = float(stake_element.text) if stake_element else 0.0
-        description_id = f'news-id-{bet_url.split("/")[-1].split("-")[0]}'
-        description_element = soup.find('div', id=description_id)
-        description = description_element.text.strip() if description_element else ''
-        return {
-            'event_datetime': event_datetime,
-            'outcome_type': outcome_type,
-            'link': link,
-            'sport': sport,
-            'sides': sides,
-            'league': league,
-            'stake': stake,
-            'odds': odds,
-            'status': 'wait',
-            'description': description
-        }
+        # Проверяем наличие дива с результатом
+        result_element = soup.select_one('div.vp-forecast-bet__value-bank.vp-forecast-bet__value-bank-result')
+        print(result_element)
+        outcome_type = None
+        if result_element:
+            try:
+                if 'is-default' in result_element.get('class', []):
+                    outcome_type = "draw"
+                elif 'is-up' in result_element.get('class', []):
+                    outcome_type = "win"
+                elif 'is-down' in result_element.get('class', []):
+                    outcome_type = "lose"
+
+                return {
+                    'outcome_type': outcome_type,
+                    'status': 'done'
+                }
+            except Exception as e:
+                error_message = f"Error in parse_bet_data function, processing result_element: {result_element}\nError: {str(e)}"
+                logging.error(error_message)
+                asyncio.run(send_telegram_message(error_message, chat_id=telegram_id))
+                return None
+
+        else:
+            # Если элемента нет, собираем данные для нового прогноза
+            try:
+                event_datetime = soup.find('time', class_='vp-match-card-content__info-match-date')['datetime']
+                outcome_type = "new"
+                link = bet_url
+                sides = soup.find('h1', class_='site-title site-title_h2').text
+                sport = soup.find('b', class_='vp-match-card-content__info-match-type').text
+                league = soup.find('span', class_='vp-match-card-content__info-match-league').text
+                bet_title = soup.find('div', class_='vp-forecast-bet__title')
+                stake = bet_title.find('a').text if bet_title else ''
+                stake_element = bet_title.find_all('a')[1] if bet_title and len(bet_title.find_all('a')) > 1 else None
+                odds = float(stake_element.text) if stake_element else 0.0
+                description_id = f'news-id-{bet_url.split("/")[-1].split("-")[0]}'
+                description_element = soup.find('div', id=description_id)
+                description = description_element.text.strip() if description_element else ''
+                return {
+                    'event_datetime': event_datetime,
+                    'outcome_type': outcome_type,
+                    'link': link,
+                    'sport': sport,
+                    'sides': sides,
+                    'league': league,
+                    'stake': stake,
+                    'odds': odds,
+                    'status': 'wait',
+                    'description': description
+                }
+            except Exception as e:
+                error_message = f"Error in parse_bet_data function, processing new bet data: {bet_url}\nError: {str(e)}"
+                logging.error(error_message)
+                asyncio.run(send_telegram_message(error_message, chat_id=telegram_id))
+                return None
+    except Exception as e:
+        error_message = f"Error in parse_bet_data function when requesting URL: {bet_url}\nError: {str(e)}"
+        logging.error(error_message)
+        asyncio.run(send_telegram_message(error_message, chat_id=telegram_id))
+        return None
 
 
 # Функция для создания таблицы в БД
